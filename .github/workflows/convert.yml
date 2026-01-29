@@ -62,6 +62,12 @@ jobs:
               continue
             fi
 
+            # Skip non-video files instead of failing the whole workflow.
+            if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$f" | grep -q '^video$'; then
+              echo "Skip (not a video): $f"
+              continue
+            fi
+
             echo "Converting: $f -> $out_path (ms=$SLIDESHOW_MS)"
             bin/slideshow.sh --ms "$SLIDESHOW_MS" --file "$f" --out "$out_path"
             converted=$((converted+1))
@@ -82,4 +88,7 @@ jobs:
 
           git add out
           git commit -m "Update slideshow outputs"
+
+          # In case multiple pushes happen close together.
+          git pull --rebase
           git push

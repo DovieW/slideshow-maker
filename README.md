@@ -8,4 +8,9 @@ bin/slideshow.sh --ms 3000 --file in/input.mp4 --out out/input.mp4
 ```
 
 ## GitHub Actions
-On push to `master`, the workflow converts every file in `in/` into `out/` (same filename). The milliseconds value is controlled by the `SLIDESHOW_MS` repository variable (or workflow env).
+On push to `master`, the workflow converts every file in `in/` into `out/` (same filename).
+
+Set the milliseconds value as a **repository variable**:
+- Settings → Secrets and variables → Actions → **Variables** → New repository variable
+- Name: `SLIDESHOW_MS`
+- Value: e.g. `3000`
