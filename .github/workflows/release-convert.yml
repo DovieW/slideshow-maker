@@ -106,20 +106,10 @@ jobs:
             "$assets_url")
 
           # Build a list of existing asset names for idempotency.
-          printf '%s' "$assets_json" | python3 - <<'PY' > work/existing_names.txt
-import json,sys
-assets=json.load(sys.stdin)
-for a in assets:
-    print(a.get('name',''))
-PY
+          printf '%s' "$assets_json" | python3 -c "import json,sys; assets=json.load(sys.stdin); [print(a.get('name','')) for a in assets]" > work/existing_names.txt
 
           # Emit pairs (api_url\0name\0...) so filenames can contain spaces/unicode safely.
-          printf '%s' "$assets_json" | python3 - <<'PY' > work/assets.nul
-import json,sys
-assets=json.load(sys.stdin)
-for a in assets:
-    sys.stdout.write(a.get('url','') + '\0' + a.get('name','') + '\0')
-PY
+          printf '%s' "$assets_json" | python3 -c "import json,sys; assets=json.load(sys.stdin); [sys.stdout.write(a.get('url','') + '\0' + a.get('name','') + '\0') for a in assets]" > work/assets.nul
 
           i=0
           converted=0
