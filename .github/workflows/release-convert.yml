@@ -1,0 +1,185 @@
+name: Convert release assets to slideshows
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Release ID to process (for manual runs)"
+        required: false
+        default: ""
+      tag:
+        description: "Release tag to process (for manual runs, ignored if release_id is set)"
+        required: false
+        default: ""
+      ms:
+        description: "Milliseconds per frame (overrides SLIDESHOW_MS if provided)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  SLIDESHOW_MS: ${{ inputs.ms != '' && inputs.ms || vars.SLIDESHOW_MS }}
+
+jobs:
+  convert-release-assets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          if [ -z "${SLIDESHOW_MS:-}" ]; then
+            echo "SLIDESHOW_MS is not set. Set it as a repository variable (Settings → Secrets and variables → Actions → Variables)." >&2
+            exit 1
+          fi
+          case "$SLIDESHOW_MS" in
+            ''|*[!0-9]*) echo "SLIDESHOW_MS must be a positive integer; got '$SLIDESHOW_MS'" >&2; exit 1;;
+          esac
+          if [ "$SLIDESHOW_MS" -le 0 ]; then
+            echo "SLIDESHOW_MS must be > 0" >&2
+            exit 1
+          fi
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Convert and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          owner_repo="${GITHUB_REPOSITORY}"
+          api_base="https://api.github.com"
+          upload_base=""
+          assets_url=""
+
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            release_id="${{ github.event.release.id }}"
+            upload_base="${{ github.event.release.upload_url }}"
+            assets_url="${{ github.event.release.assets_url }}"
+          else
+            # workflow_dispatch
+            release_id="${{ inputs.release_id }}"
+            tag="${{ inputs.tag }}"
+
+            if [ -z "$release_id" ]; then
+              if [ -z "$tag" ]; then
+                echo "Error: provide inputs.release_id or inputs.tag for workflow_dispatch" >&2
+                exit 2
+              fi
+              release_id=$(curl -fsSL \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "${api_base}/repos/${owner_repo}/releases/tags/${tag}" \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+            fi
+
+            # Fetch release metadata
+            rel_json=$(curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${api_base}/repos/${owner_repo}/releases/${release_id}")
+            upload_base=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["upload_url"])' "$rel_json")
+            assets_url=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["assets_url"])' "$rel_json")
+          fi
+
+          upload_base="${upload_base%%\{*}"
+          if [ -z "$upload_base" ] || [ -z "$assets_url" ]; then
+            echo "Error: could not resolve release upload/assets URLs" >&2
+            exit 2
+          fi
+
+          mkdir -p work
+
+          assets_json=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$assets_url")
+
+          # Build a list of existing asset names for idempotency.
+          printf '%s' "$assets_json" | python3 - <<'PY' > work/existing_names.txt
+import json,sys
+assets=json.load(sys.stdin)
+for a in assets:
+    print(a.get('name',''))
+PY
+
+          # Emit pairs (api_url\0name\0...) so filenames can contain spaces/unicode safely.
+          printf '%s' "$assets_json" | python3 - <<'PY' > work/assets.nul
+import json,sys
+assets=json.load(sys.stdin)
+for a in assets:
+    sys.stdout.write(a.get('url','') + '\0' + a.get('name','') + '\0')
+PY
+
+          i=0
+          converted=0
+          skipped=0
+          while IFS= read -r -d '' api_url && IFS= read -r -d '' name; do
+            [ -n "$api_url" ] || continue
+            [ -n "$name" ] || continue
+
+            stem="$name"
+            if [[ "$name" == *.* ]]; then
+              stem="${name%.*}"
+            fi
+            out_name="${stem}_slideshow_${SLIDESHOW_MS}ms.mp4"
+
+            if grep -Fxq "$out_name" work/existing_names.txt; then
+              echo "Skip (already uploaded): $out_name"
+              skipped=$((skipped+1))
+              continue
+            fi
+
+            in_path="work/in_${i}"
+            out_path="work/${out_name}"
+            i=$((i+1))
+
+            echo "Downloading asset: $name"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              "$api_url" \
+              -o "$in_path"
+
+            # Skip non-video assets.
+            if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "$in_path" | grep -q '^video$'; then
+              echo "Skip (not a video asset): $name"
+              skipped=$((skipped+1))
+              continue
+            fi
+
+            echo "Converting: $name -> $out_name (ms=$SLIDESHOW_MS)"
+            bin/slideshow.sh --ms "$SLIDESHOW_MS" --file "$in_path" --out "$out_path"
+
+            enc_name=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$out_name")
+            echo "Uploading: $out_name"
+            curl -fsSL \
+              -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${out_path}" \
+              "${upload_base}?name=${enc_name}" \
+              >/dev/null
+
+            converted=$((converted+1))
+          done < work/assets.nul
+
+          echo "Converted: $converted, skipped: $skipped"
+
+      - name: Upload converted files as artifact (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-converted-${{ github.run_id }}
+          path: work/*_slideshow_*.mp4
+          if-no-files-found: ignore
