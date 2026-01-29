@@ -7,6 +7,12 @@ on:
       - 'in/**'
       - 'bin/slideshow.sh'
       - '.github/workflows/convert.yml'
+  workflow_dispatch:
+    inputs:
+      ms:
+        description: "Milliseconds per frame (overrides SLIDESHOW_MS if provided)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -16,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SLIDESHOW_MS: ${{ vars.SLIDESHOW_MS }}
+  SLIDESHOW_MS: ${{ inputs.ms != '' && inputs.ms || vars.SLIDESHOW_MS }}
 
 jobs:
   convert:
