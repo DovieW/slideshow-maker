@@ -1,0 +1,2 @@
+# keep input/output folders tracked, but ignore OS/editor noise
+.DS_Store
